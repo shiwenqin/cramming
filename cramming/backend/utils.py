@@ -15,7 +15,6 @@ def get_num_workers(cfg_impl):
     else:
         return 0
 
-
 def group_parameters(model, cfg_train):
     model_parameters = list(model.named_parameters())
     if len(cfg_train.limited_decay_keys) > 0:
@@ -32,33 +31,6 @@ def group_parameters(model, cfg_train):
     else:
         grouped_parameters = [p for n, p in model_parameters]
     return grouped_parameters
-
-
-def update_ema(model_parameters, ema_parameters, model_buffers, ema_buffers, momentum=0.995):
-    """Update exponential moving average in parameters and buffers."""
-    with torch.no_grad():
-        torch._foreach_mul(ema_parameters, momentum)  # want to prevent a second call here, but doesnt seem possible as of now?
-        torch._foreach_add_(ema_parameters, model_parameters, alpha=1 - momentum)
-
-        torch._foreach_mul(ema_buffers, momentum)
-        torch._foreach_add_(ema_buffers, model_buffers, alpha=1 - momentum)
-
-
-def updated_latest_weight_average(model_parameters, model_buffers, store, last_k=10):
-    if len(store) > last_k:
-        store.pop(0)
-
-    store.append(dict(params=model_parameters, buffers=model_buffers))
-    param_store = store[0]["params"]
-    [torch._foreach_add_(param_store, storage["params"]) for storage in store[1:]]
-    torch._foreach_div(param_store, float(last_k))
-
-    buffer_store = store[0]["buffers"]
-    [torch._foreach_add_(buffer_store, storage["buffers"]) for storage in store[1:]]
-    torch._foreach_div(buffer_store, float(last_k))
-
-    return param_store, buffer_store
-
 
 def prepare_pretraining_dataloader(dataset, tokenizer, cfg_train, cfg_impl):
 

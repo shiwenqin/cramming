@@ -366,64 +366,6 @@ def set_deterministic():
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 
-def set_jit_instructions(type=None):
-    """Refer also https://github.com/pytorch/pytorch/blob/c90be037b46f58d2b120f46a1c466976f66817b5/torch/jit/_fuser.py#L20"""
-    # torch._C._set_graph_executor_optimize(True)
-    if type == "nvfuser":
-        # from BERT nvidia example
-        torch._C._jit_set_nvfuser_enabled(True)
-        torch._C._jit_set_texpr_fuser_enabled(False)
-        torch._C._jit_override_can_fuse_on_cpu(False)
-        torch._C._jit_override_can_fuse_on_gpu(False)
-        torch._C._jit_set_fusion_strategy([("STATIC", 20), ("DYNAMIC", 20)])  # maybe this is overkill
-    elif type == "nvfuser-profiler":
-        # via https://github.com/tunib-ai/oslo/blob/master/oslo/torch/jit/_utils.py
-        torch._C._jit_set_nvfuser_enabled(True)  # fuser2
-        torch._C._jit_set_profiling_executor(True)
-        torch._C._jit_set_profiling_mode(True)
-        torch._C._jit_set_texpr_fuser_enabled(False)  # fuser1
-        torch._C._jit_override_can_fuse_on_cpu(False)
-        torch._C._jit_override_can_fuse_on_gpu(False)
-        torch._C._jit_set_fusion_strategy([("STATIC", 20), ("DYNAMIC", 20)])  # maybe this is overkill
-        # torch._C._debug_set_autodiff_subgraph_inlining(False)
-    elif type == "nnc":
-        # via https://github.com/tunib-ai/oslo/blob/master/oslo/torch/jit/_utils.py
-        torch._C._jit_set_nvfuser_enabled(False)
-        torch._C._jit_set_texpr_fuser_enabled(True)
-        torch._C._jit_override_can_fuse_on_cpu(False)
-        torch._C._jit_override_can_fuse_on_gpu(False)
-    elif type == "legacy":
-        # via https://github.com/tunib-ai/oslo/blob/master/oslo/torch/jit/_utils.py
-        # legacy pytorch fuser
-        torch._C._jit_set_profiling_mode(False)
-        torch._C._jit_set_profiling_executor(False)
-        torch._C._jit_override_can_fuse_on_cpu(True)
-        torch._C._jit_override_can_fuse_on_gpu(True)
-    else:
-        # default options
-        pass
-
-
-def avg_n_dicts(dicts):
-    """https://github.com/wronnyhuang/metapoison/blob/master/utils.py."""
-    # given a list of dicts with the same exact schema, return a single dict with same schema whose values are the
-    # key-wise average over all input dicts
-    means = {}
-    for dic in dicts:
-        for key in dic:
-            if key not in means:
-                if isinstance(dic[key], list):
-                    means[key] = [0 for entry in dic[key]]
-                else:
-                    means[key] = 0
-            if isinstance(dic[key], list):
-                for idx, entry in enumerate(dic[key]):
-                    means[key][idx] += entry / len(dicts)
-            else:
-                means[key] += dic[key] / len(dicts)
-    return means
-
-
 def dump_metrics(cfg, metrics):
     """Simple yaml dump of metric values."""
 

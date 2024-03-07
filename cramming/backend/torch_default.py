@@ -13,7 +13,6 @@ import torch._inductor.utils
 import os
 import json
 from omegaconf import OmegaConf
-from functools import partial
 from contextlib import nullcontext
 import time
 
@@ -25,9 +24,8 @@ from transformers.utils.generic import working_or_temp_dir
 
 from torch.distributed.optim import ZeroRedundancyOptimizer
 
-from .utils import group_parameters, prepare_pretraining_dataloader, update_ema, updated_latest_weight_average
+from .utils import group_parameters, prepare_pretraining_dataloader
 from .optimizers.schedulers import get_schedule_fn
-from .optimizers import Adahessian, AdamWScale, Shampoo, LARS, SAM, ProgressiveBatching, AGD, Sophia
 
 log = logging.getLogger(__name__)
 _default_setup = dict(device=torch.device("cpu"), dtype=torch.float)
@@ -44,13 +42,7 @@ def initialize_torch(model, dataset, tokenizer, cfg_train, cfg_impl, elapsed_tim
     else:
         dataloader = None
 
-    # in most cases we can use a simpler Engine class:
-    require_full_engine = "sequence_curriculum" in cfg_train or "weight_averaging" in cfg_train or "gradinit" in cfg_train
-
-    if require_full_engine:
-        model_engine = TorchEngineFull(model, cfg_train, cfg_impl, elapsed_time, setup=setup, seq_length=tokenizer.model_max_length)
-    else:
-        model_engine = TorchEngineMinimal(model, cfg_train, cfg_impl, elapsed_time, setup=setup, seq_length=tokenizer.model_max_length)
+    model_engine = TorchEngineMinimal(model, cfg_train, cfg_impl, elapsed_time, setup=setup, seq_length=tokenizer.model_max_length)
     model_engine.train()  # This is the default engine state. Pretraining scripts may change this.
     return model_engine, model_engine.optimizer, model_engine.scheduler, dataloader
 
@@ -359,170 +351,6 @@ class TorchEngineMinimal(torch.nn.Module):
         else:
             log.info(f"Skipping huggingface upload in dryrun state. Would upload to {cfg.impl.hf_directoy_name}.")
 
-
-class TorchEngineFull(TorchEngineMinimal):
-    """This class mirrors deepspeed functionality. Not all changes are implemented in this version.
-
-    See TorchEngineFull for more modifications.
-    """
-
-    def __init__(self, model, cfg_train, cfg_impl, setup=_default_setup, seq_length=128):
-        """Load Engine. The model will be compiled by default."""
-        super().__init__(model, cfg_train, cfg_impl, setup, seq_length)
-
-        # Optional sequence curriculum:
-        self.sequence_curriculum = "sequence_curriculum" in cfg_train
-        self.data_seq_length = seq_length
-        self.current_seq_length = seq_length if not self.sequence_curriculum else cfg_train.sequence_curriculum.lengths[0]
-        self.sequence_unfold = None if not self.sequence_curriculum else cfg_train.sequence_curriculum.unfold
-
-        # Optional EMA/LAWA-type weight averages
-        if "weight_averaging" in cfg_train:
-            self.weight_averaging_frequency = cfg_train.weight_averaging.frequency
-            self.weight_averaging = cfg_train.weight_averaging
-            if self.weight_averaging.type == "EMA":
-                self.param_store = [p.detach().clone() for p in model.parameters()]  # keep on CPU
-                self.buffer_store = [b.detach().clone() for b in model.buffers()]
-            else:
-                self.store = []
-        else:
-            self.weight_averaging_frequency = 0
-        self.initial_time = time.time()
-
-    def optimizer_step(self):
-        """Requires a scheduler that is based on iterations instead of epochs."""
-        super().optimizer_step()
-        if self.accumulated_samples >= self.current_batch_size:
-            self.schedule_curriculum()
-            self.moving_average_computation()
-
-    def to_device(self, batch: dict[str, torch.Tensor], keys: list[str] = ["input_ids", "labels"]):
-        """Move batch of data into device memory."""
-        device_batch = super().to_device(batch)
-        self.set_sequence_curriculum_(device_batch)
-        return device_batch
-
-    def set_sequence_curriculum_(self, device_batch):
-        """Assume huggingface data is B S"""
-        if self.sequence_curriculum:
-            for key, tensor in device_batch.items():
-                if self.sequence_unfold:
-                    device_batch[key] = tensor.view(-1, self.current_seq_length)
-                else:
-                    device_batch[key] = tensor[:, : self.current_seq_length].clone()
-
-    def schedule_curriculum(self):
-        """Optionally implement linear sequence lengths curriculum."""
-        if self.sequence_curriculum:
-            # Sequence curriculum should be a dict of two lists:
-            # lengths (needs to be monotone ascending integers)
-            # triggers (needs to be monotone ascending floats between 0 and 1)
-            # and a keyword unfold = True/False
-            elapsed_hours = (time.time() - self.initial_time) / 60 / 60
-            fraction_elapsed = elapsed_hours / self.cfg_train.budget
-            lengths = self.cfg_train.sequence_curriculum.lengths
-            triggers = self.cfg_train.sequence_curriculum.triggers
-            for trigger, length in zip(triggers, lengths):
-                if fraction_elapsed > trigger:
-                    self.current_seq_length = length
-
-    def record_tokens_per_step(self):
-        """Tokens in each microbatch step."""
-        if not self.sequence_curriculum:
-            return self.current_seq_length * self.cfg_impl.microbatch_size
-        else:
-            if self.sequence_unfold:
-                # Same number of tokens in this case:
-                return self.current_seq_length * (self.data_seq_length // self.current_seq_length) * self.cfg_impl.microbatch_size
-            else:
-                # Reduced number of tokens here:
-                return self.current_seq_length * self.cfg_impl.microbatch_size
-
-    def moving_average_computation(self):
-        if self.weight_averaging_frequency > 0:
-            if (self.steps % self.weight_averaging_frequency) == 0:
-                params = [p.detach().cpu() for p in self.model.parameters()]
-                buffers = [b.detach().cpu() for b in self.model.buffers()]
-                if self.weight_averaging.type == "EMA":
-                    update_ema(params, self.param_store, buffers, self.buffer_store, momentum=self.weight_averaging.momentum)
-                else:  # latest weight averaging
-                    self.param_store, self.buffer_store = updated_latest_weight_average(
-                        params, buffers, self.store, last_k=self.weight_averaging.last_k
-                    )
-
-    @torch.no_grad()
-    def retrieve_model_state_dict(self):
-        if self.weight_averaging_frequency > 0:
-            # Use weight averaged weights
-            for param, param_ma in zip(self.model.parameters(), self.param_store):
-                param.copy_(param_ma.data)
-            for buffer, buffer_ma in zip(self.model.buffers(), self.buffer_store):
-                buffer.copy_(buffer_ma.data)
-            return self.model.state_dict()
-        else:
-            # Else use normal state dict
-            return self.model.state_dict()
-
-    def gradinit(self, data_iterable, optim_cfg, gradinit_cfg):
-        """Run data-based initialization search as described in Zhu et al.,
-        "GradInit: Learning to Initialize Neural Networks for Stable and Efficient Training"
-
-        Depends on functorch!
-
-        This is gradinit without gradient aggregation, which allows higher-order derivatives
-        """
-        import functorch
-
-        fmodel, params, buffers = functorch.make_functional_with_buffers(self.model)
-
-        scales = [torch.tensor(1.0, **self.setup, requires_grad=True) for p in params]  # Modify all params by default
-        # Prepare for functional optimizer:
-
-        exp_avgs = [torch.tensor(0.0, **self.setup) for s in scales]
-        exp_avg_sqs = [torch.tensor(0.0, **self.setup) for s in scales]
-        state_steps = [torch.tensor(0.0, **self.setup) for s in scales]
-
-        adam_fn = partial(torch.optim._functional.adam, amsgrad=False, beta1=0.9, beta2=0.98, weight_decay=0, eps=1e-6, maximize=False)
-
-        eta = optim_cfg.lr
-        for step in range(gradinit_cfg.steps):
-            # scale params
-            scaled_params = [p * s for p, s in zip(params, scales)]
-            # ## Compute first step ##
-            data_batch = self.to_device(next(data_iterable)[1])
-            with torch.autocast(**self.amp_settings):
-                loss0 = fmodel(**data_batch, params=scaled_params, buffers=buffers)["loss"]
-            grads = torch.autograd.grad(loss0, scaled_params, create_graph=gradinit_cfg.second_order, only_inputs=True)
-            gnorm = torch.norm(torch.stack([torch.norm(g) for g in grads]))
-            # Take first step
-            # p <- p - eta*g
-            if gradinit_cfg.step_type == "sign-grad":
-                param_step = [p - eta * g.sign() for p, g in zip(scaled_params, grads)]
-            elif gradinit_cfg.step_type == "norm-grad":
-                param_step = [p - eta * g / gnorm for p, g in zip(scaled_params, grads)]
-            else:
-                param_step = [p - eta * g for p, g in zip(scaled_params, grads)]
-
-            # ## Modify scales ##
-            data_batch = self.to_device(next(data_iterable)[1])
-            with torch.autocast(**self.amp_settings):
-                loss1 = fmodel(**data_batch, params=param_step, buffers=buffers)["loss"]
-            grads = torch.autograd.grad(loss1 / eta + (gnorm - 1).pow(2), scales, only_inputs=True)
-            [g.zero_() for (name, _), g in zip(self.model.named_parameters(), grads) if "pos_embedding" in name]
-            # Take adam step:
-            with torch.no_grad():
-                adam_fn(scales, grads, exp_avgs, exp_avg_sqs, [], state_steps, lr=gradinit_cfg.tau)
-                # Project onto constraints and detach
-                scales = [s.clamp_(min=gradinit_cfg.min_scale, max=gradinit_cfg.max_scale) for s in scales]
-            log.info(f"Gradinit: Loss0: {loss0:2.4f}. Loss1: {loss1:2.4f}. Grad Norm: {gnorm:2.4f}.")
-            # print([f"{name}:{s.item():2.4f}" for (name, _), s in zip(self.model.named_parameters(), scales)])
-
-        # Finally copy scales into the existing model
-        with torch.no_grad():
-            for param, scale in zip(self.model.parameters(), scales):
-                param.mul_(scale)
-
-
 def _load_optimizer(model, cfg_train, cfg_impl, initial_time):
 
     # Filter some parameters
@@ -539,26 +367,6 @@ def _load_optimizer(model, cfg_train, cfg_impl, initial_time):
         optimizer_class = torch.optim.SGD
     elif cfg_train.optim.type == "Adafactor":
         optimizer_class = transformers.Adafactor
-    elif cfg_train.optim.type == "Shampoo":
-        optimizer_class = Shampoo
-    elif cfg_train.optim.type == "AdaHessian":
-        optimizer_class = Adahessian
-    elif cfg_train.optim.type == "AdamWScale":
-        optimizer_class = AdamWScale
-    elif cfg_train.optim.type == "Sophia-G":
-        optimizer_class = Sophia
-    elif cfg_train.optim.type == "Lion":
-        from lion_pytorch import Lion
-
-        optimizer_class = Lion
-
-    elif cfg_train.optim.type == "Adam8bit":
-        import bitsandbytes as bnb
-
-        optimizer_class = bnb.optim.Adam8bit
-    elif cfg_train.optim.type == "AGD":
-        depth = len(list(model.parameters()))
-        optimizer_class = partial(AGD, depth=depth)
     else:
         raise ValueError(f"Invalid optimizer {cfg_train.optim.type} given.")
     optimizer_args = {k: v for k, v in cfg_train.optim.items() if k != "type"}
@@ -577,20 +385,7 @@ def _load_optimizer(model, cfg_train, cfg_impl, initial_time):
     else:
         optimizer = optimizer_class(grouped_parameters, **optimizer_args)
 
-    if cfg_train.optim_mod.name == "none":
-        optimizer_to_schedule = optimizer
-    else:
-        optim_params = {k: v for k, v in cfg_train.optim_mod.items() if k != "name"}
-        if cfg_train.optim_mod.name == "LARS":
-            optimizer = LARS(optimizer, **optim_params)
-        elif cfg_train.optim_mod.name == "LARC":
-            optimizer = LARS(optimizer, **optim_params)
-        elif cfg_train.optim_mod.name == "SAM":
-            optimizer = SAM(optimizer, **optim_params)
-        elif cfg_train.optim_mod.name == "progressive-batching":
-            optimizer = ProgressiveBatching(optimizer, **optim_params)
-
-        optimizer_to_schedule = optimizer.optim
+    optimizer_to_schedule = optimizer
 
     scheduler = get_schedule_fn(initial_time, cfg_train)(optimizer_to_schedule)
 
