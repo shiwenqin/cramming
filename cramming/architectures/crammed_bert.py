@@ -8,7 +8,6 @@ for all those, check scriptable_bert.py on the old branch.
 """
 import torch
 from transformers import PretrainedConfig, PreTrainedModel
-from transformers import AutoConfig, AutoModel, AutoModelForMaskedLM, AutoModelForSequenceClassification, AutoModelForTokenClassification
 
 from typing import Optional
 from omegaconf import OmegaConf
@@ -19,11 +18,11 @@ from .components import (
     EmbeddingComponent,
     PoolingComponent,
     PredictionHeadComponent,
-    GLU,
+    AttentionComponent,
+    FFNComponent,
     get_extended_attention_mask,
     _init_module,
 )
-from .attention import get_attention_mechanism
 
 
 class crammedBertConfig(PretrainedConfig):
@@ -43,50 +42,11 @@ def construct_crammed_bert(cfg_arch, vocab_size, downstream_classes=None):
     if downstream_classes is None:
         if config.arch["objective_layout"] == "MLM":
             model = ScriptableLMForPreTraining(config)
-        elif config.arch["objective_layout"] == "SCRIPT":
-            model = ScriptableLMForSCRIPTTraining(config)
         else:
             raise ValueError(f"Invalid layout {config.arch['objective_layout']} of training objective given.")
     else:
         model = ScriptableLMForSequenceClassification(config)
     return model
-
-
-class AttentionComponent(torch.nn.Module):
-    def __init__(self, idx, hidden_size, cfg_attention, use_bias=True):
-        super().__init__()
-        self.self_attention = get_attention_mechanism(idx, hidden_size, cfg_attention)
-        if cfg_attention.skip_output_projection:
-            self.dense = torch.nn.Identity()
-        else:
-            self.dense = torch.nn.Linear(self.self_attention.output_dim, hidden_size, bias=use_bias)
-
-        self.LAYOUT = self.self_attention.LAYOUT
-
-    def forward(self, hidden_states, attention_mask: Optional[torch.Tensor] = None):
-        return self.dense(self.self_attention(hidden_states, attention_mask))
-
-
-class FFNComponent(torch.nn.Module):
-    """Note: The FF layer is not auto-scaled when using a GLU type activation.
-    It actually turned out better not to scale it, so here the block is effectively smaller than may be expected.
-
-    The neox suggestion for approx. equal parameter count is int(4 * 2 / 3 * hidden_size) * 2 [this is ~5.33]
-    """
-
-    def __init__(self, hidden_size, intermed_size, nonlin_fn=torch.nn.GELU, use_bias=True):
-        super().__init__()
-        self.dense_in = torch.nn.Linear(hidden_size, intermed_size, bias=use_bias)
-        self.nonlin = nonlin_fn()
-        if isinstance(self.nonlin, GLU):
-            intermed_output_size = intermed_size // 2
-        else:
-            intermed_output_size = intermed_size
-        self.dense_out = torch.nn.Linear(intermed_output_size, hidden_size, bias=use_bias)
-
-    def forward(self, hidden_states):
-        return self.dense_out(self.nonlin(self.dense_in(hidden_states)))
-
 
 class TransformerLayer(torch.nn.Module):
     """A transformer-encoder structure based on the components from above."""
@@ -287,102 +247,6 @@ class ScriptableLMForSequenceClassification(PreTrainedModel):
         return dict(logits=logits, loss=loss)
 
 
-class ScriptableLMForSCRIPTTraining(PreTrainedModel):
-    """Pretraining machinery using SCRIPT from Nijkamp et al., 2021. Always running sparse prediction."""
-
-    config_class = crammedBertConfig
-    ALPHA = 1.0  # SCRIPT constant
-
-    def __init__(self, config):
-        super().__init__(config)
-        self.cfg = OmegaConf.create(config.arch)
-        self.num_labels = self.cfg.num_labels
-
-        self.encoder = ScriptableLM(config)
-        self.prediction_head = PredictionHeadComponent(self.cfg)
-
-        self.decoder = torch.nn.Linear(self.cfg.embedding.embedding_dim, self.cfg.embedding.vocab_size, bias=self.cfg.decoder_bias)
-        self.decoder.weight = self.encoder.embedding.word_embedding.weight
-
-        self.loss_fn = torch.nn.CrossEntropyLoss()
-        self.sparse_prediction = self.cfg.sparse_prediction
-        assert self.sparse_prediction
-
-        self._init_weights()
-
-    def _init_weights(self, module=None):
-        modules = self.modules() if module is None else [module]
-        for module in modules:
-            _init_module(
-                module,
-                self.cfg.init.type,
-                self.cfg.init.std,
-                self.cfg.hidden_size,
-                self.cfg.num_transformer_layers,
-            )
-
-    def forward(self, input_ids, attention_mask: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None):
-        loss = torch.tensor(0.0, dtype=torch.float, device=input_ids.device)
-
-        outputs = self.encoder(input_ids, attention_mask)
-        outputs = outputs.view(-1, outputs.shape[-1])
-
-        if labels is not None:
-            # ## Generation pass ##
-            labels = labels.view(-1)
-            mask_positions = labels.view(-1) != self.loss_fn.ignore_index
-            num_masks_guaranteed = round(self.sparse_prediction * labels.shape[0])
-            indices = torch.argsort(mask_positions.int())[-num_masks_guaranteed:]
-
-            # sparse outputs for prediction
-            outputs = outputs[indices]
-            labels = labels[indices]
-
-            logits = self.decoder(self.prediction_head(outputs))  # sparse logits
-            loss += self.loss_fn(logits, labels)
-
-            # ## Discrimination pass ##
-            resampled_token_ids = self._gumbel_sample(logits.detach())
-            discriminator_input_ids = input_ids.clone().view(-1)
-            discriminator_input_ids[indices] = resampled_token_ids
-
-            critic_labels = (input_ids.view(-1) != discriminator_input_ids).to(outputs.dtype)
-
-            outputs = self.encoder(discriminator_input_ids.view_as(input_ids), attention_mask).view(-1, outputs.shape[-1])
-            disc_logits = self.decoder(self.prediction_head(outputs))  # full logits
-            binary_logits = self._get_binary_logits(disc_logits)
-
-            # ELECTRA-type discriminator:
-            loss += self.ALPHA * torch.nn.functional.binary_cross_entropy_with_logits(binary_logits, critic_labels)
-
-        else:
-            logits = self.decoder(self.prediction_head(outputs))
-            loss += outputs.new_zeros((1,))
-
-        return {"loss": loss, "logits": logits}
-
-    def _get_binary_logits(self, logits):
-        # Convert to binary decision as described in SCRIPT
-        # exp_logitsum = torch.exp(disc_logits).sum(dim=-1)  # autocast ok?
-        # binary_logits = torch.stack([1 / (exp_logitsum + 1), exp_logitsum / (exp_logitsum + 1)], dim=-1)  # stack minus and plus
-        # instead, we can also compute logit[binary_logits], which is
-
-        # let y = sum(exp(logits)) / ( sum(exp(logits))+1 ), 1-y = 1 / ( sum(exp(logits))+1 )
-        # log(y / (1-y)) = log( sum(exp(logits)) / ( sum(exp(logits))+1 ) * ( sum(exp(logits))+1 ) / 1)
-        #                = log(sum(exp(logits))
-        # Then, we can use BCEWithLogitsLoss, to safely compute logit probs via sigmoids
-        return torch.logsumexp(logits, dim=-1)
-
-    def _gumbel_sample(self, logits, temperature=1.0):
-        """via https://github.com/lucidrains/electra-pytorch/blob/master/electra_pytorch/electra_pytorch.py"""
-        return ((logits / temperature) + self._gumbel_noise(logits)).argmax(dim=-1)
-
-    def _gumbel_noise(self, inputs, eps=1e-9):
-        """via https://github.com/lucidrains/electra-pytorch/blob/master/electra_pytorch/electra_pytorch.py"""
-        noise = torch.zeros_like(inputs).uniform_(0, 1)
-        return -torch.log(-torch.log(noise + eps) + eps)
-
-
 class ScriptableLMForTokenClassification(PreTrainedModel):
     """Classification head without pooling."""
 
@@ -440,11 +304,3 @@ class ScriptableLMForTokenClassification(PreTrainedModel):
 
         return dict(logits=logits, loss=loss)
 
-
-# ###### HF registry here ############### #
-
-AutoConfig.register("crammedBERT", crammedBertConfig)
-AutoModel.register(crammedBertConfig, ScriptableLM)
-AutoModelForMaskedLM.register(crammedBertConfig, ScriptableLMForPreTraining)
-AutoModelForSequenceClassification.register(crammedBertConfig, ScriptableLMForSequenceClassification)
-AutoModelForTokenClassification.register(crammedBertConfig, ScriptableLMForTokenClassification)

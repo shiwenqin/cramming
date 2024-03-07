@@ -52,9 +52,6 @@ class AttentionComponent(torch.nn.Module):
         super().__init__()
         self.self_attention = get_attention_mechanism(idx, hidden_size, cfg_attention)
 
-        if cfg_attention.high_level_fusion:
-            self.self_attention = torch.jit.script(self.self_attention)
-
         if cfg_attention.skip_output_projection:
             self.dense = torch.nn.Identity()
         else:

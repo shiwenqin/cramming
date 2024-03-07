@@ -1,8 +1,6 @@
 """Interface to construct models."""
 
 from .huggingface_interface import construct_huggingface_model
-from .funnel_transformers import construct_scriptable_funnel
-from .recurrent_transformers import construct_scriptable_recurrent
 from .sanity_check import SanityCheckforPreTraining
 from .crammed_bert import construct_crammed_bert
 
@@ -18,10 +16,6 @@ def construct_model(cfg_arch, vocab_size, downstream_classes=None):
         # attempt to solve locally
         if "ScriptableCrammedBERT" in cfg_arch.architectures:
             model = construct_crammed_bert(cfg_arch, vocab_size, downstream_classes)
-        elif "ScriptableFunnelLM" in cfg_arch.architectures:
-            model = construct_scriptable_funnel(cfg_arch, vocab_size, downstream_classes)
-        elif "ScriptableRecurrentLM" in cfg_arch.architectures:
-            model = construct_scriptable_recurrent(cfg_arch, vocab_size, downstream_classes)
         elif "SanityCheckLM" in cfg_arch.architectures:
             model = SanityCheckforPreTraining(cfg_arch.width, vocab_size)
 
