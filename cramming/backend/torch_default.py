@@ -279,14 +279,17 @@ class TorchEngineMinimal(torch.nn.Module):
         log.info(f"Sucessfully loaded state with metadata {save_state['metadata']}")
         return save_state["metadata"]
 
-    def save_final_model(self, base_directory, identifier, tokenizer, cfg_arch, dryrun=False):
+    def save_final_model(self, base_directory, identifier, tokenizer, cfg_arch, dryrun=False, eval=False):
         """This checkpoint can be used for downstream tasks.
         The default behavior is to save this checkpoint to a checkpoints folder under base_directory/name/checkpoints"""
         try:
             identifier_str = f"{identifier:2.4f}"
         except ValueError:
             identifier_str = str(identifier)
-        full_path = os.path.join(base_directory, "checkpoints", identifier_str)
+        if eval:
+            full_path = os.path.join(base_directory, "eval_checkpoints", identifier_str)
+        else:
+            full_path = os.path.join(base_directory, "checkpoints", identifier_str)
         os.makedirs(full_path, exist_ok=True)
         # This saves tokenizer_config.json, tokenizer.json and special_tokens_map.json to this folder
         if not dryrun:
