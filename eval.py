@@ -2,7 +2,7 @@
 
 import torch
 import hydra
-
+import os
 
 import time
 import datetime
@@ -92,6 +92,11 @@ def main_downstream_process(cfg, setup):
             msg_metrics = " ".join([f"{k}: {v:2.4f}" for k, v in extra_eval_metric.items()])
             log.info(f"Extra validation metric is {msg_metrics} after finetuning.")
             cramming.utils.wandb_log({f"{task_name}_{k}_extra": [v] for k, v in extra_eval_metric.items()}, cfg)
+
+        if cfg.eval.save_model:
+            now = datetime.datetime.now().strftime("%Y-%m-%d")
+            long_checkpoint_id = f"{cfg_arch.architectures[0]}_{now}_{task_name}_{msg_metrics}"
+            model_engine.save_final_model(os.path.join(cfg.base_dir, cfg.name), long_checkpoint_id, tokenizer, cfg_arch, dryrun=cfg.dryrun, eval=True)
 
     # Check average metric over all tasks:
     target_metrics = []
