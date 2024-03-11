@@ -103,7 +103,7 @@ You can log runs to your weights&biases account. To do so, simply modify `wandb.
 
 To replicate the final recipe discussed in the paper, run
 ```
-python pretrain.py name=amp_b8192_cb_o4_final arch=crammed-bert train=bert-o4  data=pile-readymade
+python pretrain.py name=amp_b8192_cb_o4_final arch=crammed-bert train=bert-o4 data=pile-readymade
 ```
 to pretrain and
 ```
