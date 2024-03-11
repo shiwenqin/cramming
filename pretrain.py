@@ -47,6 +47,10 @@ def main_training_process(cfg, setup):
     # Launch training
     for step, batch in enumerate(dataloader, initial_step + 1):
 
+        # Escape if no pretraining is desired
+        if cfg.train.no_pretrain:
+            break
+
         # Heavy lifting is moved to engines
         device_batch = model_engine.to_device(batch)
         loss = model_engine.step(device_batch)
@@ -87,17 +91,22 @@ def main_training_process(cfg, setup):
     # Save to summary:
     cramming.utils.save_summary("pretrain", cfg, stats, time.time() - local_time, setup)
     if cramming.utils.is_main_process():
-        # Save final checkpoint? Might have to recover the latest checkpoint first
-        if not loss.detach().isfinite() and cfg.impl.save_intermediate_checkpoints:
-            model_engine.load_training_checkpoint(checkpoint_rendevous)
-            loss = torch.as_tensor(16.0)  # fake value for model file name
-        if loss.detach().isfinite():
+        if cfg.train.no_pretrain:
             now = datetime.datetime.now()
-            long_checkpoint_id = f"{''.join(cfg.arch.architectures)}_{now.strftime('%Y-%m-%d')}_{loss:2.4f}"
+            long_checkpoint_id = f"{''.join(cfg.arch.architectures)}_{now.strftime('%Y-%m-%d')}"
             model_engine.save_final_model(os.path.join(cfg.base_dir, cfg.name), long_checkpoint_id, tokenizer, cfg.arch, cfg.dryrun)
+        else:
+            # Save final checkpoint? Might have to recover the latest checkpoint first
+            if not loss.detach().isfinite() and cfg.impl.save_intermediate_checkpoints:
+                model_engine.load_training_checkpoint(checkpoint_rendevous)
+                loss = torch.as_tensor(16.0)  # fake value for model file name
+            if loss.detach().isfinite():
+                now = datetime.datetime.now()
+                long_checkpoint_id = f"{''.join(cfg.arch.architectures)}_{now.strftime('%Y-%m-%d')}_{loss:2.4f}"
+                model_engine.save_final_model(os.path.join(cfg.base_dir, cfg.name), long_checkpoint_id, tokenizer, cfg.arch, cfg.dryrun)
 
-            if cfg.impl.push_to_huggingface_hub:
-                model_engine.push_to_hub(tokenizer, cfg, dryrun=cfg.dryrun)
+                if cfg.impl.push_to_huggingface_hub:
+                    model_engine.push_to_hub(tokenizer, cfg, dryrun=cfg.dryrun)
     metrics = dict(num_params=sum([p.numel() for p in model.parameters()]))
     return metrics
 
