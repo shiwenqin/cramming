@@ -1,7 +1,6 @@
 """Utilities common to several backends."""
 import os
 
-
 import torch
 import transformers
 from torch.utils.data import DataLoader
@@ -14,6 +13,7 @@ def get_num_workers(cfg_impl):
         return min(torch.get_num_threads() // max(1, torch.cuda.device_count()), cfg_impl.threads)
     else:
         return 0
+
 
 def group_parameters(model, cfg_train):
     model_parameters = list(model.named_parameters())
@@ -31,6 +31,7 @@ def group_parameters(model, cfg_train):
     else:
         grouped_parameters = [p for n, p in model_parameters]
     return grouped_parameters
+
 
 def prepare_pretraining_dataloader(dataset, tokenizer, cfg_train, cfg_impl):
 
