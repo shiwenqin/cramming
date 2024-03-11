@@ -1,5 +1,4 @@
-# Version 4 of changes to bert training hyperparameters
-# Optimizes MLM rate for torch.compile, includes improved weight decay limitation, finally updated to a relative bs ramp
+# Train for 0 steps, only retain the initialization
 
 name: bert-o4
 
@@ -13,7 +12,7 @@ optim:
 
 limited_decay_keys: [bias, LayerNorm.bias, LayerNorm.weight, norm] # no weight decay for these layers
 
-no_pretrain: False
+no_pretrain: True
 
 # Steps:
 warmup_steps: 0

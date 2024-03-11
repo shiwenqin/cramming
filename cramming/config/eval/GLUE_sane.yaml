@@ -17,6 +17,8 @@ optim:
 name: GLUE
 evaluation_set: validation # always keep this at validation except for the final run
 
+save_model: False
+
 # checkpoint name:
 # This can be either "latest", or a reference to a specific checkpoint in a subfolder
 checkpoint: latest
