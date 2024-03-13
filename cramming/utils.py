@@ -15,6 +15,7 @@ import collections
 import torch
 import torch._inductor.config
 import transformers
+import safetensors
 
 
 import json
@@ -184,6 +185,23 @@ def num_processes():
     num_procs = 1 if not torch.distributed.is_initialized() else torch.distributed.get_world_size()
     return num_procs
 
+def find_component_checkpoint(cfg):
+    """Load pre-trained 'components' from checkpoint."""
+    cfg = cfg.arch
+    cfg_arch_lst = []
+    weight_dict_lst = []
+    total_layer = 0
+    local_checkpoint_folder = os.path.join(cfg["base_dir"], cfg["folder"])
+    for component in cfg["components"]:
+        checkpoint_path = os.path.join(local_checkpoint_folder, component)
+        with open(os.path.join(checkpoint_path, "model_config.json"), "r") as file:
+            cfg_arch = OmegaConf.create(json.load(file))
+        model_file = os.path.join(checkpoint_path, "model.safetensors")
+        weight_dict = safetensors.torch.load_file(model_file)
+        cfg_arch_lst.append(cfg_arch)
+        weight_dict_lst.append(weight_dict)
+        total_layer += cfg_arch.num_transformer_layers
+    return cfg_arch_lst, weight_dict_lst, total_layer
 
 def find_pretrained_checkpoint(cfg, downstream_classes=None):
     """Load a checkpoint either locally or from the internet."""

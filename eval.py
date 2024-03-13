@@ -95,7 +95,7 @@ def main_downstream_process(cfg, setup):
 
         if cfg.eval.save_model:
             now = datetime.datetime.now().strftime("%Y-%m-%d")
-            long_checkpoint_id = f"{cfg_arch.architectures[0]}_{now}_{task_name}_{msg_metrics}"
+            long_checkpoint_id = f"{cfg_arch.architectures[0]}_{now}_{task_name}_{msg_metrics}".replace(" ", "")
             model_engine.save_final_model(os.path.join(cfg.base_dir, cfg.name), long_checkpoint_id, tokenizer, cfg_arch, dryrun=cfg.dryrun, eval=True)
 
     # Check average metric over all tasks:

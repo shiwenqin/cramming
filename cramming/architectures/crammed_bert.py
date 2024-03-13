@@ -11,6 +11,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 from typing import Optional
 from omegaconf import OmegaConf
+from pathlib import Path
 
 from .components import (
     _get_norm_fn,
@@ -23,7 +24,7 @@ from .components import (
     get_extended_attention_mask,
     _init_module,
 )
-
+from ..utils import find_component_checkpoint
 
 class crammedBertConfig(PretrainedConfig):
     model_type = "crammedBERT"
@@ -47,6 +48,7 @@ def construct_crammed_bert(cfg_arch, vocab_size, downstream_classes=None):
     else:
         model = ScriptableLMForSequenceClassification(config)
     return model
+
 
 class TransformerLayer(torch.nn.Module):
     """A transformer-encoder structure based on the components from above."""
@@ -135,7 +137,46 @@ class ScriptableLMForPreTraining(PreTrainedModel):
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.sparse_prediction = self.cfg.sparse_prediction
 
+        self.param_dict = self._get_param_dict()
+
         self._init_weights()
+
+        if self.cfg.active:
+            self.source_archs, self.weight_dicts, self.total_layer_source = find_component_checkpoint(config)
+            self._load_weights(self.weight_dicts, self.source_archs, self.total_layer_source, self.cfg.start_layer)
+
+
+    def _get_param_dict(self):
+        param_dict = {}
+        for name, param in self.named_parameters():
+            if param.requires_grad:
+                param_dict[name] = param
+        return param_dict
+
+    
+    def _load_single_layer(self, weight_dict, layer_num_source, layer_num_target):
+        target_prefix = f"encoder.layers.{layer_num_target}."
+        source_prefix = f"encoder.layers.{layer_num_source}."
+        for name, param in weight_dict.items():
+            #print(name, param.shape)
+            if param.shape == torch.Size([]):
+                continue
+            if name.startswith(source_prefix):
+                name_source = name.replace(source_prefix, target_prefix)
+                self.param_dict[name_source].data = param.data
+                print(f"Loaded {name_source} from {name}")
+
+
+    def _load_weights(self, weight_dicts, archs, total_layer_num, start_layer=0):
+        if total_layer_num + start_layer > self.cfg.num_transformer_layers:
+            raise ValueError("Too many layers in the combined model to fit into the current model.")
+        curr_layer = start_layer
+        for i, (weight_dict, arch) in enumerate(zip(weight_dicts, archs)):
+            num_layers = arch.num_transformer_layers
+            for j in range(num_layers):
+                self._load_single_layer(weight_dict, j, j + curr_layer)
+            curr_layer += num_layers
+
 
     def _init_weights(self, module=None):
         modules = self.modules() if module is None else [module]
@@ -147,6 +188,7 @@ class ScriptableLMForPreTraining(PreTrainedModel):
                 self.cfg.hidden_size,
                 self.cfg.num_transformer_layers,
             )
+        
 
     def forward(self, input_ids, attention_mask: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None, **kwargs):
         outputs = self.encoder(input_ids, attention_mask)
