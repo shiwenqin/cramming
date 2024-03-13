@@ -1,0 +1,13 @@
+active: False
+
+folder: no_pretrain_2_layer/eval_checkpoints
+
+load_embeddings: False
+
+start_layer: 0
+
+components:
+    - ScriptableCrammedBERT_2024-03-11_sst2_accuracy:0.8268
+    - ScriptableCrammedBERT_2024-03-11_qqp_accuracy:0.8212f1:0.7653
+    - ScriptableCrammedBERT_2024-03-11_mrpc_accuracy:0.7108f1:0.8040
+    - ScriptableCrammedBERT_2024-03-11_mnli_accuracy:0.6272

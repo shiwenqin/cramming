@@ -7,6 +7,7 @@ defaults:
   - impl: torch-default
   - wandb: default
   - train: bert-base
+  - combine: default
   - _self_
   - override hydra/job_logging: custom
 
