@@ -1,4 +1,5 @@
 outputs
+scripts
 tables/*/*.csv
 tables/*/*.csv#
 tables/*.csv
