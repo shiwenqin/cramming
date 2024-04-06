@@ -1,0 +1,20 @@
+active: False
+
+folder: /localdisk/data2/Users/s2618109/codes/Probing/models/
+load_embeddings: False
+
+start_layer: 0
+per_component_layer_num: 2
+
+residual: False
+connect: series # series or parallel
+
+components:
+    - bert_untrain_2.safetensor
+    - bert_untrain_2.safetensor
+    - bert_untrain_2.safetensor
+    - bert_untrain_2.safetensor
+    - bert_untrain_2.safetensor
+    - bert_untrain_2.safetensor
+    - bert_untrain_2.safetensor
+    - bert_untrain_2.safetensor

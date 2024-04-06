@@ -4,7 +4,7 @@ name: pile-readymade
 sources:
   hub:
     provider: hub
-hf_location: JonasGeiping/the_pile_WordPiecex32768_2efdb9d060d1ae95faf952ec1a50f020
+hf_location: JonasGeiping/the_pile_WordPiecex32768_e9f3c90fb38fb46185ad86ed3b69b9d5
 streaming: True
 
 vocab_size: 32768 # cannot be changed!

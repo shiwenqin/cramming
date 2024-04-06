@@ -68,5 +68,8 @@ active: ${combine.active}
 folder: ${combine.folder}
 load_embeddings: ${combine.load_embeddings}
 start_layer: ${combine.start_layer}
+per_component_layer_num: ${combine.per_component_layer_num}
+residual: ${combine.residual}
+connect: ${combine.connect}
 components: ${combine.components}
 base_dir: ${base_dir}
