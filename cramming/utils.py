@@ -94,6 +94,9 @@ def system_startup(cfg):
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True  # Should be true anyway
+    else:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
 
     multiprocess.set_start_method("forkserver")
     if cfg.impl.local_staging_dir is not None:
@@ -186,6 +189,17 @@ def num_processes():
     return num_procs
 
 def find_component_checkpoint(cfg):
+    cfg = cfg.arch
+    weight_dict_lst = []
+    total_layer = 0
+    for component in cfg["components"]:
+        model_file = os.path.join(cfg["folder"], component)
+        weight_dict = safetensors.torch.load_file(model_file)
+        weight_dict_lst.append(weight_dict)
+        total_layer += cfg["per_component_layer_num"]
+    return weight_dict_lst, total_layer
+
+def find_component_checkpoint_legacy(cfg):
     """Load pre-trained 'components' from checkpoint."""
     cfg = cfg.arch
     cfg_arch_lst = []
@@ -202,6 +216,7 @@ def find_component_checkpoint(cfg):
         weight_dict_lst.append(weight_dict)
         total_layer += cfg_arch.num_transformer_layers
     return cfg_arch_lst, weight_dict_lst, total_layer
+
 
 def find_pretrained_checkpoint(cfg, downstream_classes=None):
     """Load a checkpoint either locally or from the internet."""

@@ -43,6 +43,8 @@ def construct_crammed_bert(cfg_arch, vocab_size, downstream_classes=None):
     if downstream_classes is None:
         if config.arch["objective_layout"] == "MLM":
             model = ScriptableLMForPreTraining(config)
+        elif config.arch["objective_layout"] == "probing":
+            model = ScriptableLMForProbingTraining(config)
         else:
             raise ValueError(f"Invalid layout {config.arch['objective_layout']} of training objective given.")
     else:
@@ -115,6 +117,99 @@ class ScriptableLM(PreTrainedModel):
         return self.final_norm(hidden_states)
 
 
+# class ScriptableLMLoad(PreTrainedModel):
+#     """Enable parameter loading from trained small models"""
+
+#     config_class = crammedBertConfig
+
+#     def __init__(self, config):
+#         super().__init__(config)
+#         self.cfg = OmegaConf.create(config.arch)
+
+#         self.embedding = EmbeddingComponent(self.cfg.embedding, self.cfg.norm, self.cfg.norm_eps)
+
+#         total_load_layer = len(self.cfg.components) * self.cfg.per_component_layer_num
+#         if total_load_layer > self.cfg.num_transformer_layers:
+#             raise ValueError("Too many layers in the combined model to fit into the current model.")
+        
+#         self.load_blocks = torch.nn.ModuleList([])
+#         for i in range(len(self.cfg.components)):
+#             self.load_blocks.append(TransformerLayer(idx, self.cfg) for idx in range(self.cfg.per_component_layer_num))
+
+#         self.layers = torch.nn.ModuleList([TransformerLayer(idx, self.cfg) for idx in range(self.cfg.num_transformer_layers)])
+#         self.seq_first = self.layers[0].LAYOUT == "[S B H]" if len(self.layers) > 0 else False
+#         self.use_causal_attention = self.cfg.attention.causal_attention
+
+#         if self.cfg.final_norm:
+#             self.final_norm = _get_norm_fn(self.cfg.norm)(self.cfg.hidden_size, eps=self.cfg.norm_eps)
+#         else:
+#             self.final_norm = torch.nn.Identity()
+
+#     def forward(self, input_ids, attention_mask: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None):
+#         if attention_mask is not None:
+#             attention_mask = get_extended_attention_mask(attention_mask, input_ids.shape, self.use_causal_attention)
+#         hidden_states = self.embedding(input_ids)
+
+#         if self.seq_first:
+#             hidden_states = hidden_states.transpose(0, 1).contiguous()
+
+#         for i, layer_module in enumerate(self.layers):
+#             hidden_states = layer_module(hidden_states, attention_mask)
+
+#         if self.seq_first:
+#             hidden_states = hidden_states.transpose(0, 1).contiguous()
+
+#         return self.final_norm(hidden_states)
+
+
+# class ScriptableLMWithResidual(PreTrainedModel):
+#     "Add residual connection from embedding to each layer"
+
+#     config_class = crammedBertConfig
+
+#     def __init__(self, config):
+#         super().__init__(config)
+#         self.cfg = OmegaConf.create(config.arch)
+
+#         self.embedding = EmbeddingComponent(self.cfg.embedding, self.cfg.norm, self.cfg.norm_eps)
+#         self.layers = torch.nn.ModuleList([TransformerLayer(idx, self.cfg) for idx in range(self.cfg.num_transformer_layers)])
+#         self.seq_first = self.layers[0].LAYOUT == "[S B H]" if len(self.layers) > 0 else False
+#         self.use_causal_attention = self.cfg.attention.causal_attention
+
+#         if self.cfg.final_norm:
+#             self.final_norm = _get_norm_fn(self.cfg.norm)(self.cfg.hidden_size, eps=self.cfg.norm_eps)
+#         else:
+#             self.final_norm = torch.nn.Identity()
+    
+#     def forward(self, input_ids, attention_mask: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None):
+#         if attention_mask is not None:
+#             attention_mask = get_extended_attention_mask(attention_mask, input_ids.shape, self.use_causal_attention)
+#         embedding_out = self.embedding(input_ids)
+
+#         if self.seq_first:
+#             embedding_out = embedding_out.transpose(0, 1).contiguous()
+
+#         hidden_states = self.layers[0](embedding_out, attention_mask)
+
+#         for i, layer_module in enumerate(self.layers):
+#             if i == 0:
+#                 continue
+#             hidden_states = embedding_out + layer_module(hidden_states, attention_mask)
+
+#         if self.seq_first:
+#             hidden_states = hidden_states.transpose(0, 1).contiguous()
+
+#         return self.final_norm(hidden_states)
+
+
+# class ScriptableLMWithParallelLayers(PreTrainedModel):
+
+#     config_class = crammedBertConfig
+
+#     def __init__(self, config):
+#         pass
+
+
 class ScriptableLMForPreTraining(PreTrainedModel):
     """Pretraining version with optional prediction head and variant for sparse prediction."""
 
@@ -137,45 +232,51 @@ class ScriptableLMForPreTraining(PreTrainedModel):
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.sparse_prediction = self.cfg.sparse_prediction
 
-        self.param_dict = self._get_param_dict()
-
         self._init_weights()
 
         if self.cfg.active:
-            self.source_archs, self.weight_dicts, self.total_layer_source = find_component_checkpoint(config)
-            self._load_weights(self.weight_dicts, self.source_archs, self.total_layer_source, self.cfg.start_layer)
+            self.weight_dicts, self.total_layer_source = find_component_checkpoint(config)
+            print(f"Found {len(self.weight_dicts)} components with {self.total_layer_source} layers.")
+            self._load_weights(self.weight_dicts, self.total_layer_source, self.cfg.start_layer)
 
-
-    def _get_param_dict(self):
-        param_dict = {}
-        for name, param in self.named_parameters():
-            if param.requires_grad:
-                param_dict[name] = param
-        return param_dict
+            if self.cfg.load_embeddings:
+                self._load_embeddings(self.weight_dicts[0])
 
     
     def _load_single_layer(self, weight_dict, layer_num_source, layer_num_target):
         target_prefix = f"encoder.layers.{layer_num_target}."
-        source_prefix = f"encoder.layers.{layer_num_source}."
+        source_prefix = f"subject_model.layers.{layer_num_source}."
         for name, param in weight_dict.items():
-            #print(name, param.shape)
-            if param.shape == torch.Size([]):
-                continue
             if name.startswith(source_prefix):
                 name_source = name.replace(source_prefix, target_prefix)
-                self.param_dict[name_source].data = param.data
-                print(f"Loaded {name_source} from {name}")
+                # Silly way
+                for name_model, param_model in self.named_parameters():
+                    if name_model == name_source:
+                        param_model.data = param.data
+                        print(f"Loaded {name_source} from {name}")                    
 
 
-    def _load_weights(self, weight_dicts, archs, total_layer_num, start_layer=0):
+    def _load_weights(self, weight_dicts, total_layer_num, start_layer=0):
         if total_layer_num + start_layer > self.cfg.num_transformer_layers:
             raise ValueError("Too many layers in the combined model to fit into the current model.")
         curr_layer = start_layer
-        for i, (weight_dict, arch) in enumerate(zip(weight_dicts, archs)):
-            num_layers = arch.num_transformer_layers
+        for _, weight_dict in enumerate(weight_dicts):
+            num_layers = self.cfg.per_component_layer_num
             for j in range(num_layers):
                 self._load_single_layer(weight_dict, j, j + curr_layer)
             curr_layer += num_layers
+
+
+    def _load_embeddings(self, weight_dict):
+        for name, param in weight_dict.items():
+            if name.startswith("subject_model."):
+                name = name.replace("subject_model.", "")
+            if name.startswith("embedding."):
+                name_target = "encoder." + name
+                for name_model, param_model in self.named_parameters():
+                    if name_model == name_target:
+                        param_model.data = param.data
+                        print(f"Loaded {name_target} from {name}")
 
 
     def _init_weights(self, module=None):
@@ -204,6 +305,7 @@ class ScriptableLMForPreTraining(PreTrainedModel):
                 masked_lm_loss = outputs.new_zeros((1,))
 
         return {"loss": masked_lm_loss, "outputs": outputs}
+
 
     # Sparse prediction usually has an unpredictable number of entries in each batch
     # but the dataloader was modified so that 25% of the batch is ALWAYS masked.
@@ -346,3 +448,56 @@ class ScriptableLMForTokenClassification(PreTrainedModel):
 
         return dict(logits=logits, loss=loss)
 
+
+class ScriptableLMForProbingTraining(PreTrainedModel):
+
+    config_class = crammedBertConfig
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.cfg = OmegaConf.create(config.arch)
+        self.loss_fn = torch.nn.CrossEntropyLoss()
+
+        self.encoder = ScriptableLM(config)
+
+        self.in_projection = torch.nn.ModuleList([torch.nn.Linear(self.cfg.probing.input_dim, self.cfg.probing.hidden_dim),
+                                            torch.nn.Linear(self.cfg.probing.input_dim, self.cfg.probing.hidden_dim)])
+        self.attention_scorers = torch.nn.ModuleList([torch.nn.Linear(self.cfg.probing.hidden_dim, 1, bias=False),
+                                                torch.nn.Linear(self.cfg.probing.hidden_dim, 1, bias=False)])
+        
+        self.classifier = torch.nn.Linear(self.cfg.probing.hidden_dim, self.cfg.num_labels)
+        self._init_weights()
+
+
+    def _init_weights(self, module=None):
+        modules = self.modules() if module is None else [module]
+        for module in modules:
+            _init_module(
+                module,
+                self.cfg.init.type,
+                self.cfg.init.std,
+                self.cfg.hidden_size,
+                self.cfg.num_transformer_layers,
+            )
+
+
+    def forward(self, input_ids, attention_mask: Optional[torch.Tensor] = None, target_spans = None, labels: Optional[torch.Tensor] = None, k: int = 0):
+        
+        outputs = self.encoder(input_ids, attention_mask)
+
+        spans = [outputs[i, a:b] for i, a, b in target_spans]
+
+        # apply projections with parameters for span target k
+        embed_spans = [self.in_projection[k](span) for span in spans]
+        att_vectors = [self.attention_scorers[k](span).softmax(0)
+                       for span in spans]
+        
+        pooled_spans = [att_vec.T @ embed_span
+                        for att_vec, embed_span in zip(embed_spans, att_vectors)]
+
+        pool_res = torch.stack(pooled_spans).squeeze(-1)
+        res = self.classifier(pool_res)
+
+        loss = self.loss_fn(res, labels)
+
+        return {"loss": loss, "outputs": res}
