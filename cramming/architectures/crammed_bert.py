@@ -94,7 +94,7 @@ class ScriptableLM(PreTrainedModel):
         self.cfg = OmegaConf.create(config.arch)
 
         self.embedding = EmbeddingComponent(self.cfg.embedding, self.cfg.norm, self.cfg.norm_eps)
-        self.layers = torch.nn.ModuleList([TransformerLayer(idx, self.cfg) for idx in range(self.cfg.num_transformer_layers)])
+        self.layers = torch.nn.ModuleList(self._get_modules())
         self.seq_first = self.layers[0].LAYOUT == "[S B H]" if len(self.layers) > 0 else False
         self.use_causal_attention = self.cfg.attention.causal_attention
 
@@ -103,16 +103,35 @@ class ScriptableLM(PreTrainedModel):
         else:
             self.final_norm = torch.nn.Identity()
 
+    def _get_modules(self):
+        if not self.cfg.residual or len(self.cfg.components) == 1: # Usual setting
+            return [TransformerLayer(idx, self.cfg) for idx in range(self.cfg.num_transformer_layers)]
+        else: # Add residual connections from the embedding layer to each block
+            component_num = len(self.cfg.components)
+            res_layers =[]
+            for i in range(component_num):
+                res_layers.append(self.cfg.start_layer + i * self.cfg.per_component_layer_num)
+            print(f"Embedding residual connections at layers {res_layers}")
+
+            module_lst = []
+            for i in range(self.cfg.num_transformer_layers):
+                if i in res_layers:
+                    module_lst.append(TransformerLayer(i, self.cfg, emb_skip=True))
+                else:
+                    module_lst.append(TransformerLayer(i, self.cfg, emb_skip=False))
+            return module_lst
+
     def forward(self, input_ids, attention_mask: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None):
         if attention_mask is not None:
             attention_mask = get_extended_attention_mask(attention_mask, input_ids.shape, self.use_causal_attention)
-        hidden_states = self.embedding(input_ids)
+        embed_out = self.embedding(input_ids)
+        hidden_states = embed_out
 
         if self.seq_first:
             hidden_states = hidden_states.transpose(0, 1).contiguous()
 
         for i, layer_module in enumerate(self.layers):
-            hidden_states = layer_module(hidden_states, attention_mask = attention_mask)
+            hidden_states = layer_module(hidden_states, attention_mask = attention_mask, embedding = embed_out)
 
         if self.seq_first:
             hidden_states = hidden_states.transpose(0, 1).contiguous()
