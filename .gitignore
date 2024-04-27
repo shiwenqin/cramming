@@ -6,6 +6,8 @@ tables/*.csv
 tables/*.csv#
 tables/*.ods
 
+components/
+
 trails
 try.py
 
