@@ -40,3 +40,9 @@ objective:
 reverse_dataset_order: False
 
 budget: ${budget}
+
+# Layer freezing:
+
+freeze: False
+freeze_layers: [-1, 0, 1]
+freeze_step: 1

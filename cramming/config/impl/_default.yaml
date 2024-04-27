@@ -32,7 +32,7 @@ early_termination:
   loss_threshold: 6.0 # modify this for non-xent losses
 
 # Device micro batch size settings:
-microbatch_size: 128 # dont make it larger than batch_size...
+microbatch_size: 256 # dont make it larger than batch_size...
 
 # Basic pytorch settings
 threads: 32 # maximal number of cpu dataloader workers used per GPU, this value will never exceed num_gpus * num_physical threads

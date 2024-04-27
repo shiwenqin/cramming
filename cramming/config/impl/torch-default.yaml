@@ -25,7 +25,7 @@ dynamic: False # this is a world of pain (when I last tested it, around torch2.0
 fullgraph: True # why even compile when not compile everywhere :>
 backend: inductor # use eager here when using the old bert-cX models
 _inductor_vars:
-  max_autotune_gemm: True
+  max_autotune_gemm: False
   max_autotune_pointwise: False # was better in some tests not to enable this?
   triton:
     cudagraphs: True
