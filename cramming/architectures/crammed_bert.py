@@ -55,7 +55,7 @@ def construct_crammed_bert(cfg_arch, vocab_size, downstream_classes=None):
 class TransformerLayer(torch.nn.Module):
     """A transformer-encoder structure based on the components from above."""
 
-    def __init__(self, idx, cfg_arch):
+    def __init__(self, idx, cfg_arch, emb_skip=False):
         super().__init__()
         self.dropout = torch.nn.Dropout(cfg_arch.hidden_dropout_prob, inplace=False)
         self.norm1 = _get_norm_fn(cfg_arch.norm)(cfg_arch.hidden_size, eps=cfg_arch.norm_eps)
@@ -67,6 +67,8 @@ class TransformerLayer(torch.nn.Module):
             cfg_arch.use_bias,
         )
         self.LAYOUT = self.attn.LAYOUT
+        # Add skip connection from embedding layer to the input of the transformer layer
+        self.emb_skip = emb_skip
 
         self.ffn = FFNComponent(
             cfg_arch.hidden_size,
@@ -75,7 +77,8 @@ class TransformerLayer(torch.nn.Module):
             cfg_arch.use_bias,
         )
 
-    def forward(self, states, attention_mask: Optional[torch.Tensor] = None):
+    def forward(self, states, embedding = None, attention_mask: Optional[torch.Tensor] = None):
+        states = (states + embedding) if self.emb_skip else states
         states = states + self.dropout(self.attn(self.norm1(states), attention_mask))
         states = states + self.dropout(self.ffn(self.norm2(states)))
         return states
@@ -109,105 +112,12 @@ class ScriptableLM(PreTrainedModel):
             hidden_states = hidden_states.transpose(0, 1).contiguous()
 
         for i, layer_module in enumerate(self.layers):
-            hidden_states = layer_module(hidden_states, attention_mask)
+            hidden_states = layer_module(hidden_states, attention_mask = attention_mask)
 
         if self.seq_first:
             hidden_states = hidden_states.transpose(0, 1).contiguous()
 
         return self.final_norm(hidden_states)
-
-
-# class ScriptableLMLoad(PreTrainedModel):
-#     """Enable parameter loading from trained small models"""
-
-#     config_class = crammedBertConfig
-
-#     def __init__(self, config):
-#         super().__init__(config)
-#         self.cfg = OmegaConf.create(config.arch)
-
-#         self.embedding = EmbeddingComponent(self.cfg.embedding, self.cfg.norm, self.cfg.norm_eps)
-
-#         total_load_layer = len(self.cfg.components) * self.cfg.per_component_layer_num
-#         if total_load_layer > self.cfg.num_transformer_layers:
-#             raise ValueError("Too many layers in the combined model to fit into the current model.")
-        
-#         self.load_blocks = torch.nn.ModuleList([])
-#         for i in range(len(self.cfg.components)):
-#             self.load_blocks.append(TransformerLayer(idx, self.cfg) for idx in range(self.cfg.per_component_layer_num))
-
-#         self.layers = torch.nn.ModuleList([TransformerLayer(idx, self.cfg) for idx in range(self.cfg.num_transformer_layers)])
-#         self.seq_first = self.layers[0].LAYOUT == "[S B H]" if len(self.layers) > 0 else False
-#         self.use_causal_attention = self.cfg.attention.causal_attention
-
-#         if self.cfg.final_norm:
-#             self.final_norm = _get_norm_fn(self.cfg.norm)(self.cfg.hidden_size, eps=self.cfg.norm_eps)
-#         else:
-#             self.final_norm = torch.nn.Identity()
-
-#     def forward(self, input_ids, attention_mask: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None):
-#         if attention_mask is not None:
-#             attention_mask = get_extended_attention_mask(attention_mask, input_ids.shape, self.use_causal_attention)
-#         hidden_states = self.embedding(input_ids)
-
-#         if self.seq_first:
-#             hidden_states = hidden_states.transpose(0, 1).contiguous()
-
-#         for i, layer_module in enumerate(self.layers):
-#             hidden_states = layer_module(hidden_states, attention_mask)
-
-#         if self.seq_first:
-#             hidden_states = hidden_states.transpose(0, 1).contiguous()
-
-#         return self.final_norm(hidden_states)
-
-
-# class ScriptableLMWithResidual(PreTrainedModel):
-#     "Add residual connection from embedding to each layer"
-
-#     config_class = crammedBertConfig
-
-#     def __init__(self, config):
-#         super().__init__(config)
-#         self.cfg = OmegaConf.create(config.arch)
-
-#         self.embedding = EmbeddingComponent(self.cfg.embedding, self.cfg.norm, self.cfg.norm_eps)
-#         self.layers = torch.nn.ModuleList([TransformerLayer(idx, self.cfg) for idx in range(self.cfg.num_transformer_layers)])
-#         self.seq_first = self.layers[0].LAYOUT == "[S B H]" if len(self.layers) > 0 else False
-#         self.use_causal_attention = self.cfg.attention.causal_attention
-
-#         if self.cfg.final_norm:
-#             self.final_norm = _get_norm_fn(self.cfg.norm)(self.cfg.hidden_size, eps=self.cfg.norm_eps)
-#         else:
-#             self.final_norm = torch.nn.Identity()
-    
-#     def forward(self, input_ids, attention_mask: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None):
-#         if attention_mask is not None:
-#             attention_mask = get_extended_attention_mask(attention_mask, input_ids.shape, self.use_causal_attention)
-#         embedding_out = self.embedding(input_ids)
-
-#         if self.seq_first:
-#             embedding_out = embedding_out.transpose(0, 1).contiguous()
-
-#         hidden_states = self.layers[0](embedding_out, attention_mask)
-
-#         for i, layer_module in enumerate(self.layers):
-#             if i == 0:
-#                 continue
-#             hidden_states = embedding_out + layer_module(hidden_states, attention_mask)
-
-#         if self.seq_first:
-#             hidden_states = hidden_states.transpose(0, 1).contiguous()
-
-#         return self.final_norm(hidden_states)
-
-
-# class ScriptableLMWithParallelLayers(PreTrainedModel):
-
-#     config_class = crammedBertConfig
-
-#     def __init__(self, config):
-#         pass
 
 
 class ScriptableLMForPreTraining(PreTrainedModel):
