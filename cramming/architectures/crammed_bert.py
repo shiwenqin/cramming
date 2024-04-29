@@ -104,7 +104,7 @@ class ScriptableLM(PreTrainedModel):
             self.final_norm = torch.nn.Identity()
 
     def _get_modules(self):
-        if not self.cfg.residual or len(self.cfg.components) == 1: # Usual setting
+        if not self.cfg.residual or (len(self.cfg.components) == 1): # Usual setting
             return [TransformerLayer(idx, self.cfg) for idx in range(self.cfg.num_transformer_layers)]
         else: # Add residual connections from the embedding layer to each block
             component_num = len(self.cfg.components)
@@ -129,6 +129,7 @@ class ScriptableLM(PreTrainedModel):
 
         if self.seq_first:
             hidden_states = hidden_states.transpose(0, 1).contiguous()
+            embed_out = embed_out.transpose(0, 1).contiguous()
 
         for i, layer_module in enumerate(self.layers):
             hidden_states = layer_module(hidden_states, attention_mask = attention_mask, embedding = embed_out)
