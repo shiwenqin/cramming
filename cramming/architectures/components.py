@@ -85,7 +85,7 @@ class FFNComponent(torch.nn.Module):
         else:
             intermed_output_size = intermed_size
         if lora_cfg and lora_cfg.active:
-            self.dense_out = LoRALinear(intermed_size, hidden_size, lora_cfg.rank, lora_cfg.alpha, lora_cfg.dropout_prob)
+            self.dense_out = LoRALinear(intermed_output_size, hidden_size, lora_cfg.rank, lora_cfg.alpha, lora_cfg.dropout_prob)
         else:
             self.dense_out = torch.nn.Linear(intermed_output_size, hidden_size, bias=use_bias)
 
