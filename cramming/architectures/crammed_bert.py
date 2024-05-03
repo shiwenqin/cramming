@@ -75,6 +75,7 @@ class TransformerLayer(torch.nn.Module):
             cfg_arch.intermed_size,
             _get_nonlin_fn(cfg_arch.nonlin),
             cfg_arch.use_bias,
+            cfg_arch.lora,
         )
 
     def forward(self, states, embedding = None, attention_mask: Optional[torch.Tensor] = None):
