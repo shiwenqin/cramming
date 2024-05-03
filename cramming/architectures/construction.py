@@ -21,8 +21,9 @@ def construct_model(cfg_arch, vocab_size, downstream_classes=None):
 
     if model is not None:  # Return local model arch
         num_params = sum([p.numel() for p in model.parameters()])
+        num_trainable_params = sum([p.numel() for p in model.parameters() if p.requires_grad])
         if is_main_process():
-            log.info(f"Model with architecture {cfg_arch.architectures[0]} loaded with {num_params:,} parameters.")
+            log.info(f"Model with architecture {cfg_arch.architectures[0]} loaded with {num_params:,} parameters, {num_trainable_params:,} trainable.")
         return model
 
     try:  # else try on HF
