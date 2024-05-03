@@ -4,6 +4,8 @@ from transformers.models.bert.modeling_bert import BertSelfAttention
 
 from typing import Optional
 
+from .lora import LoRALinear
+
 
 def get_attention_mechanism(
     idx,
@@ -141,7 +143,10 @@ class LegacySeqFirstSelfAttention(torch.nn.Module):
         self.register_buffer("norm_factor", torch.tensor(self.hidden_per_head).rsqrt())
 
         # Strided linear layer.
-        self.query_key_value = torch.nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=cfg_attention.qkv_bias)
+        if cfg_attention.lora:
+            self.query_key_value = LoRALinear(self.hidden_size, 3 * self.hidden_size, cfg_attention.lora_rank, cfg_attention.lora_alpha, cfg_attention.lora_dropout_prob)
+        else:
+            self.query_key_value = torch.nn.Linear(self.hidden_size, 3 * self.hidden_size, bias=cfg_attention.qkv_bias)
         self.output_dim = hidden_size
 
         self.rotary_emb = None

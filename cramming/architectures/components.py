@@ -8,6 +8,7 @@ from functools import partial
 
 from .embeddings import SinusoidalPositional, LearnablePositional, ScaledSinosoidal
 from .attention import get_attention_mechanism
+from .lora import LoRALinear
 
 INPLACE = False
 
@@ -54,6 +55,8 @@ class AttentionComponent(torch.nn.Module):
 
         if cfg_attention.skip_output_projection:
             self.dense = torch.nn.Identity()
+        elif cfg_attention.lora:
+            self.dense = LoRALinear(hidden_size, hidden_size, cfg_attention.lora_rank, cfg_attention.lora_alpha, cfg_attention.lora_dropout_prob)
         else:
             self.dense = torch.nn.Linear(self.self_attention.output_dim, hidden_size, bias=use_bias)
 
@@ -70,15 +73,21 @@ class FFNComponent(torch.nn.Module):
     The neox suggestion for approx. equal parameter count is int(4 * 2 / 3 * hidden_size) * 2 [this is ~5.33]
     """
 
-    def __init__(self, hidden_size, intermed_size, nonlin_fn=torch.nn.GELU, use_bias=True):
+    def __init__(self, hidden_size, intermed_size, nonlin_fn=torch.nn.GELU, use_bias=True, lora_cfg=None):
         super().__init__()
-        self.dense_in = torch.nn.Linear(hidden_size, intermed_size, bias=use_bias)
+        if lora_cfg and lora_cfg.active:
+            self.dense_in = LoRALinear(hidden_size, intermed_size, lora_cfg.rank, lora_cfg.alpha, lora_cfg.dropout_prob)
+        else:
+            self.dense_in = torch.nn.Linear(hidden_size, intermed_size, bias=use_bias)
         self.nonlin = nonlin_fn()
         if isinstance(self.nonlin, GLU) or getattr(self.nonlin, "original_name", "") == "GLU":
             intermed_output_size = intermed_size // 2
         else:
             intermed_output_size = intermed_size
-        self.dense_out = torch.nn.Linear(intermed_output_size, hidden_size, bias=use_bias)
+        if lora_cfg and lora_cfg.active:
+            self.dense_out = LoRALinear(intermed_size, hidden_size, lora_cfg.rank, lora_cfg.alpha, lora_cfg.dropout_prob)
+        else:
+            self.dense_out = torch.nn.Linear(intermed_output_size, hidden_size, bias=use_bias)
 
     def forward(self, hidden_states):
         return self.dense_out(self.nonlin(self.dense_in(hidden_states)))
