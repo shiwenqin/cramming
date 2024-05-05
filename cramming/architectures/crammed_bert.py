@@ -180,11 +180,17 @@ class ScriptableLMForPreTraining(PreTrainedModel):
         for name, param in weight_dict.items():
             if name.startswith(source_prefix):
                 name_source = name.replace(source_prefix, target_prefix)
+                name_source_lora = name_source
+                if name_source.endswith("weight"):
+                    name_source_lora = name_source.replace("weight", "linear.weight")
                 # Silly way
                 for name_model, param_model in self.named_parameters():
                     if name_model == name_source:
                         param_model.data = param.data
-                        print(f"Loaded {name_source} from {name}")                    
+                        print(f"Loaded {name_source} from {name}")
+                    elif name_model == name_source_lora:
+                        param_model.data = param.data
+                        print(f"Loaded {name_source_lora} from {name}")                
 
 
     def _load_weights(self, weight_dicts, total_layer_num, start_layer=0):
