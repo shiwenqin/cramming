@@ -16,6 +16,7 @@ def construct_model(cfg_arch, vocab_size, downstream_classes=None):
         # attempt to solve locally
         if "ScriptableCrammedBERT" in cfg_arch.architectures:
             model = construct_crammed_bert(cfg_arch, vocab_size, downstream_classes)
+            print(model)
         elif "SanityCheckLM" in cfg_arch.architectures:
             model = SanityCheckforPreTraining(cfg_arch.width, vocab_size)
 

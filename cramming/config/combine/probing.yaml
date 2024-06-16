@@ -1,20 +1,13 @@
 active: False
 
-folder: /localdisk/data2/Users/s2618109/codes/Probing/models/
+folder: /localdisk/home/s2618109/Work/Codes/Probing/models/
 load_embeddings: False
 
 start_layer: 0
-per_component_layer_num: 2
+per_component_layer_num: 16
 
-residual: False
-connect: series # series or parallel
+residual: False # Not yet implemented
+connect: series # series or parallel, Not yet implemented
 
 components:
-    - bert_untrain_2.safetensor
-    - bert_untrain_2.safetensor
-    - bert_untrain_2.safetensor
-    - bert_untrain_2.safetensor
-    - bert_untrain_2.safetensor
-    - bert_untrain_2.safetensor
-    - bert_untrain_2.safetensor
-    - bert_untrain_2.safetensor
+    - pos_untrain_16.safetensor

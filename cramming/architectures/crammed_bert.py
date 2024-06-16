@@ -25,6 +25,7 @@ from .components import (
     _init_module,
 )
 from ..utils import find_component_checkpoint
+from .utils import get_size
 
 class crammedBertConfig(PretrainedConfig):
     model_type = "crammedBERT"
@@ -57,27 +58,54 @@ class TransformerLayer(torch.nn.Module):
 
     def __init__(self, idx, cfg_arch):
         super().__init__()
+        if cfg_arch.diff_size:
+            hidden, _, _ = get_size(idx, cfg_arch.hidden_size, cfg_arch.intermed_size, cfg_arch.embedding_decoder)
+        else:
+            hidden = cfg_arch.hidden_size
         self.dropout = torch.nn.Dropout(cfg_arch.hidden_dropout_prob, inplace=False)
-        self.norm1 = _get_norm_fn(cfg_arch.norm)(cfg_arch.hidden_size, eps=cfg_arch.norm_eps)
-        self.norm2 = _get_norm_fn(cfg_arch.norm)(cfg_arch.hidden_size, eps=cfg_arch.norm_eps)
+        self.norm1 = _get_norm_fn(cfg_arch.norm)(hidden, eps=cfg_arch.norm_eps)
+        self.norm2 = _get_norm_fn(cfg_arch.norm)(hidden, eps=cfg_arch.norm_eps)
         self.attn = AttentionComponent(
             idx,
             cfg_arch.hidden_size,
             cfg_arch.attention,
             cfg_arch.use_bias,
+            cfg_arch.diff_size,
+            cfg_arch.embedding_decoder,
         )
         self.LAYOUT = self.attn.LAYOUT
+        self.uneven_skip_connection = cfg_arch.uneven_skip_connection
 
         self.ffn = FFNComponent(
+            idx,
             cfg_arch.hidden_size,
             cfg_arch.intermed_size,
             _get_nonlin_fn(cfg_arch.nonlin),
             cfg_arch.use_bias,
+            cfg_arch.diff_size,
+            cfg_arch.embedding_decoder,
         )
+        if self.uneven_skip_connection == 'learnable' and self.ffn.hidden != self.ffn.output:
+            self.skip_connection = torch.nn.Linear(self.ffn.hidden, self.ffn.output, bias=False)
+            self.skip_connection.weight.data.fill_(0.0)
 
     def forward(self, states, attention_mask: Optional[torch.Tensor] = None):
         states = states + self.dropout(self.attn(self.norm1(states), attention_mask))
-        states = states + self.dropout(self.ffn(self.norm2(states)))
+        if self.ffn.hidden != self.ffn.output:
+            if self.uneven_skip_connection == 'padding':
+                # pad to output size
+                diff_shape = self.ffn.output - self.ffn.hidden
+                if diff_shape < 0:
+                    raise ValueError("Output size must be larger than hidden size to use padding mode.")
+                states = torch.nn.functional.pad(states, (0, diff_shape), 'constant', 0) + self.dropout(self.ffn(self.norm2(states)))
+            elif self.uneven_skip_connection == 'none':
+                states = self.dropout(self.ffn(self.norm2(states)))
+            elif self.uneven_skip_connection == 'learnable':
+                states = self.skip_connection(states) + self.dropout(self.ffn(self.norm2(states)))
+            else:
+                raise ValueError(f"Invalid uneven skip connection mode {self.uneven_skip_connection} given.")
+        else:
+            states = states + self.dropout(self.ffn(self.norm2(states)))
         return states
 
 
@@ -90,7 +118,7 @@ class ScriptableLM(PreTrainedModel):
         super().__init__(config)
         self.cfg = OmegaConf.create(config.arch)
 
-        self.embedding = EmbeddingComponent(self.cfg.embedding, self.cfg.norm, self.cfg.norm_eps)
+        self.embedding = EmbeddingComponent(self.cfg.embedding, self.cfg.norm, self.cfg.norm_eps, self.cfg.diff_size, self.cfg.embedding_decoder)
         self.layers = torch.nn.ModuleList([TransformerLayer(idx, self.cfg) for idx in range(self.cfg.num_transformer_layers)])
         self.seq_first = self.layers[0].LAYOUT == "[S B H]" if len(self.layers) > 0 else False
         self.use_causal_attention = self.cfg.attention.causal_attention
@@ -117,99 +145,6 @@ class ScriptableLM(PreTrainedModel):
         return self.final_norm(hidden_states)
 
 
-# class ScriptableLMLoad(PreTrainedModel):
-#     """Enable parameter loading from trained small models"""
-
-#     config_class = crammedBertConfig
-
-#     def __init__(self, config):
-#         super().__init__(config)
-#         self.cfg = OmegaConf.create(config.arch)
-
-#         self.embedding = EmbeddingComponent(self.cfg.embedding, self.cfg.norm, self.cfg.norm_eps)
-
-#         total_load_layer = len(self.cfg.components) * self.cfg.per_component_layer_num
-#         if total_load_layer > self.cfg.num_transformer_layers:
-#             raise ValueError("Too many layers in the combined model to fit into the current model.")
-        
-#         self.load_blocks = torch.nn.ModuleList([])
-#         for i in range(len(self.cfg.components)):
-#             self.load_blocks.append(TransformerLayer(idx, self.cfg) for idx in range(self.cfg.per_component_layer_num))
-
-#         self.layers = torch.nn.ModuleList([TransformerLayer(idx, self.cfg) for idx in range(self.cfg.num_transformer_layers)])
-#         self.seq_first = self.layers[0].LAYOUT == "[S B H]" if len(self.layers) > 0 else False
-#         self.use_causal_attention = self.cfg.attention.causal_attention
-
-#         if self.cfg.final_norm:
-#             self.final_norm = _get_norm_fn(self.cfg.norm)(self.cfg.hidden_size, eps=self.cfg.norm_eps)
-#         else:
-#             self.final_norm = torch.nn.Identity()
-
-#     def forward(self, input_ids, attention_mask: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None):
-#         if attention_mask is not None:
-#             attention_mask = get_extended_attention_mask(attention_mask, input_ids.shape, self.use_causal_attention)
-#         hidden_states = self.embedding(input_ids)
-
-#         if self.seq_first:
-#             hidden_states = hidden_states.transpose(0, 1).contiguous()
-
-#         for i, layer_module in enumerate(self.layers):
-#             hidden_states = layer_module(hidden_states, attention_mask)
-
-#         if self.seq_first:
-#             hidden_states = hidden_states.transpose(0, 1).contiguous()
-
-#         return self.final_norm(hidden_states)
-
-
-# class ScriptableLMWithResidual(PreTrainedModel):
-#     "Add residual connection from embedding to each layer"
-
-#     config_class = crammedBertConfig
-
-#     def __init__(self, config):
-#         super().__init__(config)
-#         self.cfg = OmegaConf.create(config.arch)
-
-#         self.embedding = EmbeddingComponent(self.cfg.embedding, self.cfg.norm, self.cfg.norm_eps)
-#         self.layers = torch.nn.ModuleList([TransformerLayer(idx, self.cfg) for idx in range(self.cfg.num_transformer_layers)])
-#         self.seq_first = self.layers[0].LAYOUT == "[S B H]" if len(self.layers) > 0 else False
-#         self.use_causal_attention = self.cfg.attention.causal_attention
-
-#         if self.cfg.final_norm:
-#             self.final_norm = _get_norm_fn(self.cfg.norm)(self.cfg.hidden_size, eps=self.cfg.norm_eps)
-#         else:
-#             self.final_norm = torch.nn.Identity()
-    
-#     def forward(self, input_ids, attention_mask: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None):
-#         if attention_mask is not None:
-#             attention_mask = get_extended_attention_mask(attention_mask, input_ids.shape, self.use_causal_attention)
-#         embedding_out = self.embedding(input_ids)
-
-#         if self.seq_first:
-#             embedding_out = embedding_out.transpose(0, 1).contiguous()
-
-#         hidden_states = self.layers[0](embedding_out, attention_mask)
-
-#         for i, layer_module in enumerate(self.layers):
-#             if i == 0:
-#                 continue
-#             hidden_states = embedding_out + layer_module(hidden_states, attention_mask)
-
-#         if self.seq_first:
-#             hidden_states = hidden_states.transpose(0, 1).contiguous()
-
-#         return self.final_norm(hidden_states)
-
-
-# class ScriptableLMWithParallelLayers(PreTrainedModel):
-
-#     config_class = crammedBertConfig
-
-#     def __init__(self, config):
-#         pass
-
-
 class ScriptableLMForPreTraining(PreTrainedModel):
     """Pretraining version with optional prediction head and variant for sparse prediction."""
 
@@ -227,7 +162,8 @@ class ScriptableLMForPreTraining(PreTrainedModel):
             self.prediction_head = torch.nn.Identity()  # from linear in old version
 
         self.decoder = torch.nn.Linear(self.cfg.embedding.embedding_dim, self.cfg.embedding.vocab_size, bias=self.cfg.decoder_bias)
-        self.decoder.weight = self.encoder.embedding.word_embedding.weight
+        if self.decoder.weight.shape == self.encoder.embedding.word_embedding.weight.shape:
+            self.decoder.weight = self.encoder.embedding.word_embedding.weight
 
         self.loss_fn = torch.nn.CrossEntropyLoss()
         self.sparse_prediction = self.cfg.sparse_prediction

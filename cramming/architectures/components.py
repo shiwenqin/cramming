@@ -8,32 +8,47 @@ from functools import partial
 
 from .embeddings import SinusoidalPositional, LearnablePositional, ScaledSinosoidal
 from .attention import get_attention_mechanism
+from .utils import get_size
 
 INPLACE = False
 
 
 class EmbeddingComponent(torch.nn.Module):
-    def __init__(self, cfg_embedding, norm, norm_eps):
+    def __init__(self, cfg_embedding, norm, norm_eps, diff_size=False, embedding_decoder="coupled"):
         super().__init__()
+        self.embedding_decoder = embedding_decoder
+        if embedding_decoder =='coupled':
+            dim = cfg_embedding.embedding_dim
+        elif embedding_decoder == 'decoupled':
+            dim, _, _ = get_size(-1, cfg_embedding.embedding_dim, 0, embedding_decoder)
+        elif embedding_decoder == 'scaled':
+            dim = cfg_embedding.embedding_dim
+            dim_scale, _, _ = get_size(0, cfg_embedding.embedding_dim, 0, embedding_decoder)
+        else:
+            raise ValueError(f'Invalid embedding_decoder mode {embedding_decoder}')
+
         self.word_embedding = torch.nn.Embedding(
-            cfg_embedding.vocab_size, cfg_embedding.embedding_dim, padding_idx=cfg_embedding.pad_token_id
+            cfg_embedding.vocab_size, dim, padding_idx=cfg_embedding.pad_token_id
         )
         if cfg_embedding.pos_embedding == "learned":
-            self.pos_embedding = LearnablePositional(cfg_embedding.embedding_dim, cfg_embedding.max_seq_length)
+            self.pos_embedding = LearnablePositional(dim, cfg_embedding.max_seq_length)
         elif cfg_embedding.pos_embedding == "sinusoidal":
-            self.pos_embedding = SinusoidalPositional(cfg_embedding.embedding_dim, cfg_embedding.max_seq_length)
+            self.pos_embedding = SinusoidalPositional(dim, cfg_embedding.max_seq_length)
         elif cfg_embedding.pos_embedding == "scaled-sinusoidal":
-            self.pos_embedding = ScaledSinosoidal(cfg_embedding.embedding_dim, cfg_embedding.max_seq_length)
+            self.pos_embedding = ScaledSinosoidal(dim, cfg_embedding.max_seq_length)
         else:
             self.pos_embedding = None
 
         self.dropout = torch.nn.Dropout(p=cfg_embedding.dropout_prob, inplace=INPLACE)
         if cfg_embedding.normalization:
             self.stabilize_low_precision = cfg_embedding.get("stable_low_precision", False)
-            self.norm = _get_norm_fn(norm)(cfg_embedding.embedding_dim, eps=norm_eps)
+            self.norm = _get_norm_fn(norm)(dim, eps=norm_eps)
         else:
             self.stabilize_low_precision = False
             self.norm = torch.nn.Identity()
+        
+        if embedding_decoder == 'scaled':
+            self.scaling = torch.nn.Linear(dim, dim_scale)
 
     def forward(self, input_ids):
         embeds = self.word_embedding(input_ids)
@@ -42,20 +57,29 @@ class EmbeddingComponent(torch.nn.Module):
 
         if self.stabilize_low_precision:
             # Stabilize as in bnb StableEmbedding
-            return self.dropout(self.norm(embeds.to(torch.get_default_dtype()))).to(embeds.dtype)
+            embeds = self.dropout(self.norm(embeds.to(torch.get_default_dtype()))).to(embeds.dtype)
         else:
-            return self.dropout(self.norm(embeds))
+            embeds = self.dropout(self.norm(embeds))
+        
+        if self.embedding_decoder == 'scaled':
+            embeds = self.scaling(embeds)
+
+        return embeds
 
 
 class AttentionComponent(torch.nn.Module):
-    def __init__(self, idx, hidden_size, cfg_attention, use_bias=True):
+    def __init__(self, idx, hidden_size, cfg_attention, use_bias=True, diff_size=False, embedding_decoder=None):
         super().__init__()
-        self.self_attention = get_attention_mechanism(idx, hidden_size, cfg_attention)
+        if diff_size:
+            hidden, _, _ = get_size(idx, hidden_size, 0, embedding_decoder)
+        else:
+            hidden = hidden_size
+        self.self_attention = get_attention_mechanism(idx, hidden, cfg_attention)
 
         if cfg_attention.skip_output_projection:
             self.dense = torch.nn.Identity()
         else:
-            self.dense = torch.nn.Linear(self.self_attention.output_dim, hidden_size, bias=use_bias)
+            self.dense = torch.nn.Linear(self.self_attention.output_dim, hidden, bias=use_bias)
 
         self.LAYOUT = self.self_attention.LAYOUT
 
@@ -70,15 +94,20 @@ class FFNComponent(torch.nn.Module):
     The neox suggestion for approx. equal parameter count is int(4 * 2 / 3 * hidden_size) * 2 [this is ~5.33]
     """
 
-    def __init__(self, hidden_size, intermed_size, nonlin_fn=torch.nn.GELU, use_bias=True):
+    def __init__(self, idx, hidden_size, intermed_size, nonlin_fn=torch.nn.GELU, use_bias=True, diff_size=False, embedding_decoder=None):
         super().__init__()
-        self.dense_in = torch.nn.Linear(hidden_size, intermed_size, bias=use_bias)
+        self.hidden = hidden_size
+        self.intermed = intermed_size
+        self.output = hidden_size
+        if diff_size:
+            self.hidden, self.intermed, self.output = get_size(idx, hidden_size, intermed_size, embedding_decoder)
+        self.dense_in = torch.nn.Linear(self.hidden, out_features=self.intermed, bias=use_bias)
         self.nonlin = nonlin_fn()
         if isinstance(self.nonlin, GLU) or getattr(self.nonlin, "original_name", "") == "GLU":
-            intermed_output_size = intermed_size // 2
+            intermed_output_size = self.intermed // 2
         else:
-            intermed_output_size = intermed_size
-        self.dense_out = torch.nn.Linear(intermed_output_size, hidden_size, bias=use_bias)
+            intermed_output_size = self.intermed
+        self.dense_out = torch.nn.Linear(intermed_output_size, self.output, bias=use_bias)
 
     def forward(self, hidden_states):
         return self.dense_out(self.nonlin(self.dense_in(hidden_states)))

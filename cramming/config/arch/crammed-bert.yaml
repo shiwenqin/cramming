@@ -10,6 +10,13 @@ hidden_size: 768
 intermed_size: 3072
 hidden_dropout_prob: 0.1
 
+# Layer hidden size
+diff_size: False
+# division_factor: 4
+# step: 4
+uneven_skip_connection: padding # Can be "padding", "learnable" or "none"
+embedding_decoder: coupled # Can be "coupled" or "decoupled" or "scaled"
+
 norm: LayerNorm
 norm_eps: 1e-12
 norm_scheme: pre #"pre" is baked into the new implementation

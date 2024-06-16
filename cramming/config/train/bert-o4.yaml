@@ -14,6 +14,7 @@ optim:
 limited_decay_keys: [bias, LayerNorm.bias, LayerNorm.weight, norm] # no weight decay for these layers
 
 no_pretrain: False
+save_init: False
 
 # Steps:
 warmup_steps: 0

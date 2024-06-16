@@ -44,6 +44,10 @@ def main_training_process(cfg, setup):
     training_allowed, no_recovery_necessary = True, True
     loss_vals = []
 
+    if cfg.train.save_init:
+        long_checkpoint_id = "step_0"
+        model_engine.save_final_model(os.path.join(cfg.base_dir, cfg.name), long_checkpoint_id, tokenizer, cfg.arch, cfg.dryrun)
+
     # Launch training
     for step, batch in enumerate(dataloader, initial_step + 1):
 
@@ -71,7 +75,9 @@ def main_training_process(cfg, setup):
         # Checkpointing is triggered from stopping criteria and normal intervals
         if cfg.impl.save_intermediate_checkpoints and step % cfg.impl.save_every_nth_step == 0:
             if loss.detach().isfinite() and cramming.utils.is_main_process() and not cfg.dryrun:
-                model_engine.save_training_checkpoint(checkpoint_rendevous, metadata=dict(step=step, elapsed=time.time() - wallclock_timer))
+                #model_engine.save_training_checkpoint(checkpoint_rendevous, metadata=dict(step=step, elapsed=time.time() - wallclock_timer))
+                long_checkpoint_id = f"step_{step}"
+                model_engine.save_final_model(os.path.join(cfg.base_dir, cfg.name), long_checkpoint_id, tokenizer, cfg.arch, cfg.dryrun)
 
         if not loss.detach().isfinite():
             training_allowed, no_recovery_necessary = engage_troubleshooting(
@@ -91,9 +97,10 @@ def main_training_process(cfg, setup):
     # Save to summary:
     cramming.utils.save_summary("pretrain", cfg, stats, time.time() - local_time, setup)
     if cramming.utils.is_main_process():
+        #now = datetime.datetime.now()
+        #long_checkpoint_id = f"{''.join(cfg.arch.architectures)}_{now.strftime('%Y-%m-%d')}_{loss:2.4f}"
+        long_checkpoint_id = f"step_{cfg.train.steps}"
         if cfg.train.no_pretrain:
-            now = datetime.datetime.now()
-            long_checkpoint_id = f"{''.join(cfg.arch.architectures)}_{now.strftime('%Y-%m-%d')}"
             model_engine.save_final_model(os.path.join(cfg.base_dir, cfg.name), long_checkpoint_id, tokenizer, cfg.arch, cfg.dryrun)
         else:
             # Save final checkpoint? Might have to recover the latest checkpoint first
@@ -101,8 +108,6 @@ def main_training_process(cfg, setup):
                 model_engine.load_training_checkpoint(checkpoint_rendevous)
                 loss = torch.as_tensor(16.0)  # fake value for model file name
             if loss.detach().isfinite():
-                now = datetime.datetime.now()
-                long_checkpoint_id = f"{''.join(cfg.arch.architectures)}_{now.strftime('%Y-%m-%d')}_{loss:2.4f}"
                 model_engine.save_final_model(os.path.join(cfg.base_dir, cfg.name), long_checkpoint_id, tokenizer, cfg.arch, cfg.dryrun)
 
                 if cfg.impl.push_to_huggingface_hub:
