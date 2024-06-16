@@ -51,6 +51,19 @@ def main_training_process(cfg, setup):
     # Launch training
     for step, batch in enumerate(dataloader, initial_step + 1):
 
+        if cfg.train.freeze:
+            layers_to_freeze = cfg.train.freeze_layers
+            if step == cfg.train.freeze_step:
+                for name, param in model_engine.model.named_parameters():
+                    embedding_prefixs = '_orig_mod.encoder.embedding.'
+                    prefixs = [f'_orig_mod.encoder.layers.{l}.' for l in layers_to_freeze if l >= 0]
+                    if any([name.startswith(prefix) for prefix in prefixs]):
+                        log.info(f"Freezing {name}.")
+                        param.requires_grad = False
+                    if name.startswith(embedding_prefixs) and -1 in layers_to_freeze:
+                        log.info(f"Freezing {name}.")
+                        param.requires_grad = False
+
         # Escape if no pretraining is desired
         if cfg.train.no_pretrain:
             break

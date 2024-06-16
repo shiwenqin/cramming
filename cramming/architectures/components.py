@@ -78,6 +78,8 @@ class AttentionComponent(torch.nn.Module):
 
         if cfg_attention.skip_output_projection:
             self.dense = torch.nn.Identity()
+        # elif cfg_attention.lora:
+        #     self.dense = LoRALinear(hidden_size, hidden_size, cfg_attention.lora_rank, cfg_attention.lora_alpha, cfg_attention.lora_dropout_prob)
         else:
             self.dense = torch.nn.Linear(self.self_attention.output_dim, hidden, bias=use_bias)
 

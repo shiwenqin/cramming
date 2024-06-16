@@ -51,6 +51,17 @@ attention:
   seq_op_in_fp32: False # whether to always cast the operation over the sequence into fp32 (e.g.. the softmax in normal attn)
   sequence_op: torch-softmax # Can be normalization
 
+  lora: ${arch.lora.active}
+  lora_rank: ${arch.lora.rank}
+  lora_alpha: ${arch.lora.alpha}
+  lora_dropout_prob: ${arch.lora.dropout_prob}
+
+lora:
+  active: False
+  rank: 64
+  alpha: 128
+  dropout_prob: 0.1
+
 init:
   type: normal
   std: 0.02

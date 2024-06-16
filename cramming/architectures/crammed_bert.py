@@ -56,7 +56,7 @@ def construct_crammed_bert(cfg_arch, vocab_size, downstream_classes=None):
 class TransformerLayer(torch.nn.Module):
     """A transformer-encoder structure based on the components from above."""
 
-    def __init__(self, idx, cfg_arch):
+    def __init__(self, idx, cfg_arch, emb_skip=False):
         super().__init__()
         if cfg_arch.diff_size:
             hidden, _, _ = get_size(idx, cfg_arch.hidden_size, cfg_arch.intermed_size, cfg_arch.embedding_decoder)
@@ -89,7 +89,8 @@ class TransformerLayer(torch.nn.Module):
             self.skip_connection = torch.nn.Linear(self.ffn.hidden, self.ffn.output, bias=False)
             self.skip_connection.weight.data.fill_(0.0)
 
-    def forward(self, states, attention_mask: Optional[torch.Tensor] = None):
+    def forward(self, states, embedding = None, attention_mask: Optional[torch.Tensor] = None):
+        states = (states + embedding) if self.emb_skip else states
         states = states + self.dropout(self.attn(self.norm1(states), attention_mask))
         if self.ffn.hidden != self.ffn.output:
             if self.uneven_skip_connection == 'padding':
@@ -128,16 +129,36 @@ class ScriptableLM(PreTrainedModel):
         else:
             self.final_norm = torch.nn.Identity()
 
+    def _get_modules(self):
+        if not self.cfg.residual or (len(self.cfg.components) == 1): # Usual setting
+            return [TransformerLayer(idx, self.cfg) for idx in range(self.cfg.num_transformer_layers)]
+        else: # Add residual connections from the embedding layer to each block
+            component_num = len(self.cfg.components)
+            res_layers =[]
+            for i in range(component_num):
+                res_layers.append(self.cfg.start_layer + i * self.cfg.per_component_layer_num)
+            print(f"Embedding residual connections at layers {res_layers}")
+
+            module_lst = []
+            for i in range(self.cfg.num_transformer_layers):
+                if i in res_layers:
+                    module_lst.append(TransformerLayer(i, self.cfg, emb_skip=True))
+                else:
+                    module_lst.append(TransformerLayer(i, self.cfg, emb_skip=False))
+            return module_lst
+
     def forward(self, input_ids, attention_mask: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None):
         if attention_mask is not None:
             attention_mask = get_extended_attention_mask(attention_mask, input_ids.shape, self.use_causal_attention)
-        hidden_states = self.embedding(input_ids)
+        embed_out = self.embedding(input_ids)
+        hidden_states = embed_out
 
         if self.seq_first:
             hidden_states = hidden_states.transpose(0, 1).contiguous()
+            embed_out = embed_out.transpose(0, 1).contiguous()
 
         for i, layer_module in enumerate(self.layers):
-            hidden_states = layer_module(hidden_states, attention_mask)
+            hidden_states = layer_module(hidden_states, attention_mask = attention_mask, embedding = embed_out)
 
         if self.seq_first:
             hidden_states = hidden_states.transpose(0, 1).contiguous()
@@ -185,11 +206,17 @@ class ScriptableLMForPreTraining(PreTrainedModel):
         for name, param in weight_dict.items():
             if name.startswith(source_prefix):
                 name_source = name.replace(source_prefix, target_prefix)
+                name_source_lora = name_source
+                if name_source.endswith("weight"):
+                    name_source_lora = name_source.replace("weight", "linear.weight")
                 # Silly way
                 for name_model, param_model in self.named_parameters():
                     if name_model == name_source:
                         param_model.data = param.data
-                        print(f"Loaded {name_source} from {name}")                    
+                        print(f"Loaded {name_source} from {name}")
+                    elif name_model == name_source_lora:
+                        param_model.data = param.data
+                        print(f"Loaded {name_source_lora} from {name}")                
 
 
     def _load_weights(self, weight_dicts, total_layer_num, start_layer=0):
